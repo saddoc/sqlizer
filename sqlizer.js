@@ -109,6 +109,7 @@ create index ix1_Lending      on dbig.Lending_Events (type, event_name, borrower
 
 
 const crypto = require('crypto')
+const fs = require('fs');
 const http = require('node:http')
 const https = require('node:https')
 const mysql = require('mysql2')
@@ -737,6 +738,24 @@ async function create_txhist_tables(db_name, drop_if_exists) {
     }
 }
 
+// Function to get stats for a specified device
+function getDiskIOStatsForDevice(device) {
+    const content = fs.readFileSync('/proc/diskstats', 'utf8');
+    const lines = content.split('\n');
+    for (let line of lines) {
+        if (line.includes(device)) {
+            const fields = line.trim().split(/\s+/);
+            return {
+                reads: parseInt(fields[3]),
+                writes: parseInt(fields[7]),
+                readBytes: parseInt(fields[5]) * 512,
+                writeBytes: parseInt(fields[9]) * 512,
+            };
+        }
+    }
+    return null;
+}
+
 async function gen_txhist_data(db_name, start, count, count_per_block, num_accounts) {
     const fs = require('fs')
     const process = require('process')
@@ -817,7 +836,7 @@ select count(*) from ${db_name}.liquidationtxhistory;`
     }
 }
 
-async function gen_txhist_data_2(db_name, start, count, count_per_block, num_accounts) {
+async function gen_txhist_data_2(db_name, start, count, count_per_block, num_accounts, device) {
     var conn = mysql.createConnection(mysql_conn_params)
     conn.connect()
 
@@ -825,6 +844,16 @@ async function gen_txhist_data_2(db_name, start, count, count_per_block, num_acc
     var tokens = []
     for (var i = 0; i < 20; i++) {
         tokens.push((await sha256("" + i)).slice(0, 42))
+    }
+
+    var query = async function(stmt) {
+        try {
+            var v = await conn.promise().query(stmt)
+            // TODO: check errors
+            // console.log(v)
+        } catch (e) {
+            console.log(`failed: ${e}`)
+        }
     }
 
     var trunc = async function(ts) {
@@ -836,17 +865,29 @@ DELETE FROM ${db_name}.tx_counts
     WHERE time_unit = 60 AND block_time < '${toDateString((ts - 86400) * 1000)}';
 DELETE FROM ${db_name}.tx_counts
     WHERE time_unit = 3600 AND block_time < '${toDateString((ts - 2678400) * 1000)}';`
-        try {
-            var v = await conn.promise().query(stmt)
-            // TODO: check errors
-            // console.log(v)
-        } catch (e) {
-            console.log(`failed: ${e}`)
-        }
+        await query(stmt)
     }
 
     var start_time = (new Date()).getTime() - count * 1000
-    var id = 1;
+    var id = start, n_written = 0, per_written = 10000, last_written = 0
+    var t = process.hrtime(), stats = getDiskIOStatsForDevice(device)
+    var out = async function(title, cnt) {
+        const ct = Math.floor((new Date()).getTime() / 1000)
+        const dt = process.hrtime(t), cstats = getDiskIOStatsForDevice(device)
+        const dtms = dt[0] * 1000 + dt[1] / 1000000
+        const rps = Math.floor(cnt / (dtms / 1000))
+        const readsPerSec = Math.floor((cstats.reads - stats.reads) / (dtms / 1000));
+        const writesPerSec = Math.floor((cstats.writes - stats.writes) / (dtms / 1000));
+        const readBytesPerSec = Math.floor((cstats.readBytes - stats.readBytes) / (dtms / 1000));
+        const writeBytesPerSec = Math.floor((cstats.writeBytes - stats.writeBytes) / (dtms / 1000));
+
+        console.log(`${title},${ct},${id-cnt},${cnt},${rps},${readsPerSec},${readBytesPerSec},${writesPerSec},${writeBytesPerSec}`)
+
+        t = process.hrtime()
+        stats = cstats
+    }
+    console.log('operation,time,index,count,rps,reads,readBytes,writes,writeBytes')
+    await query("START TRANSACTION;")
     for (var i = start; i < (start + count); i++) {
         for (var j = 0; j < count_per_block; j++) {
             var num = i
@@ -868,32 +909,30 @@ DELETE FROM ${db_name}.tx_counts
             data = JSON.stringify(data).replaceAll("\'", "\\\'")
             var now = toDateString(new Date())
 
-            var stmt = `START TRANSACTION;
-INSERT INTO ${db_name}.TxHistory (block_number, block_timestamp, address, type, tx_hash, status, func_sig, input, user, token0, token1, price0, price1, value, data, create_at, updated_at) VALUES (${num}, '${block_timestamp}', '${address}', '${typ}', '${tx_hash}', ${status}, '${func_sig}', '${input}', '${address}', '${token0}', '${token1}', '${price0}', '${price1}', '${value}', '${data}', NOW(), NOW());
-CALL ${db_name}.tx_counts_update('${typ}', '${token0}', '${address}', 1, 1, ${num}, '${block_timestamp}');
-COMMIT;`
-            try {
-                var v = await conn.promise().query(stmt)
-                // TODO: check errors
-                // console.log(v)
-            } catch (e) {
-                console.log(`failed: ${e}`)
-                break
-            }
+            var stmt = `INSERT INTO ${db_name}.txhistory (id, block_number, block_timestamp, address, type, tx_hash, status, func_sig, input, user, token0, token1, price0, price1, value, data, created_at, updated_at) VALUES (${id}, ${num}, '${block_timestamp}', '${address}', '${typ}', '${tx_hash}', ${status}, '${func_sig}', '${input}', '${address}', '${token0}', '${token1}', '${price0}', '${price1}', '${value}', '${data}', NOW(), NOW());`
+            await query(stmt)
             id++
+            n_written++
         }
 
-        if ((i % 3600) == 0) {
-            trunc(start_time + i * 1000)
+        if (n_written - last_written >= per_written) {
+            await query("COMMIT;")
+            out("insert", n_written - last_written)
+            await query(`CALL ${db_name}.tx_counts_proc();`)
+            out("counts", n_written - last_written)
+            last_written = n_written
+            await query("START TRANSACTION;")
         }
     }
-
-    // clean up tx_counts
-    // second: 1 hour = 3600
-    // minute: 1 day (86400 sec) = 60 * 24 = 1440
-    // hour:   1 month (31 days, 2678400 sec) = 31 * 24 = 744
-    // day:    forever
-    trunc(start_time + count * 1000)
+    if (n_written - last_written > 0) {
+        await query("COMMIT;")
+        out("insert", n_written - last_written)
+        await query(`CALL ${db_name}.tx_counts_proc();`)
+        out("counts", n_written - last_written)
+        last_written = n_written
+        await query("START TRANSACTION;")
+    }
+    await query("COMMIT;")
 
     conn.end()
 }
@@ -997,7 +1036,7 @@ async function main() {
         // await gen_txhist_data_2(db_name, 1, 1, 1, 30000)
         // await gen_txhist_data_2(db_name, 1, 4000, 1, 30000)
         // await gen_txhist_data_2(db_name, 1, 30000, 2, 30000)
-        await gen_txhist_data_2(db_name, 1, 300000, 2, 30000)
+        await gen_txhist_data_2(db_name, 1, 20000000, 10, 100000, 'sda')
         break
     case "txhist_stress":
         // TODO

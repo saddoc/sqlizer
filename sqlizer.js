@@ -846,6 +846,20 @@ async function gen_txhist_data_2(db_name, start, count, count_per_block, num_acc
         tokens.push((await sha256("" + i)).slice(0, 42))
     }
 
+    var getId = async function() {
+        try {
+            var v = await conn.promise().query(`SELECT id FROM ${db_name}.txhistory ORDER BY id DESC LIMIT 0,1;`)
+	    return parseInt(v[0][0].id)
+	} catch (e) {
+            return 1
+	}
+    }
+
+    var curId = (await getId()) + 1
+    if (start < curId) {
+        start = curId
+    }
+
     var query = async function(stmt) {
         try {
             var v = await conn.promise().query(stmt)
@@ -941,7 +955,9 @@ async function main() {
     function usage() {
         console.log(`Usage: node sqlizer.js [
 	lending_create <db_name> [<drop>] | lending_data | lending_stress |
-	txhist_create <db_name> [<drop>] | txhist_data <db_name> | txhist_data_2 <db_name> | txhist_stress |
+	txhist_create <db_name> [<drop>] | txhist_data <db_name> |
+	txhist_data_2 <db_name> <start> <count> <per_block> <num_accts> <dev> |
+	txhist_stress |
 	mquery <num-threads> <count> <query> <verbose> |
 	http-server <port> |
 	mget <num-threads> <count> <url> <verbose>]`)
@@ -1028,15 +1044,18 @@ async function main() {
         await gen_txhist_data(db_name, 1, 100000000, 10, 100000)
         break
     case "txhist_data_2":
-        if (args.length < 4) {
+        // node sqlizer.js txhist_data_2 <db_name> <start> <count> <per_block> <num_accts> <dev>
+        if (args.length < 9) {
             usage()
             return
         }
         var db_name = args[3]
-        // await gen_txhist_data_2(db_name, 1, 1, 1, 30000)
-        // await gen_txhist_data_2(db_name, 1, 4000, 1, 30000)
-        // await gen_txhist_data_2(db_name, 1, 30000, 2, 30000)
-        await gen_txhist_data_2(db_name, 1, 20000000, 10, 100000, 'sda')
+        var start = parseInt(args[4])
+        var count = parseInt(args[5])
+        var count_per_block = parseInt(args[6])
+        var num_accounts = parseInt(args[7])
+        var dev = args[8]
+        await gen_txhist_data_2(db_name, start, count, count_per_block, num_accounts, dev)
         break
     case "txhist_stress":
         // TODO

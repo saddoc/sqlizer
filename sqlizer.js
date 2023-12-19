@@ -223,6 +223,47 @@ async function http_get(url, agent, callback) {
     })
 }
 
+async function http_post(url, agent, data, callback, error_callback, timeout, verbose) {
+    const options = {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': data.length
+        },
+        timeout: timeout || 5000,
+        agent: agent
+    };
+
+    const req = http.request(url, options, (res) => {
+        if (res.statusCode == 301 || res.statusCode == 302) {
+            console.log(`OOO: redirect ${res.statusCode} ${url} -> ${res.headers.location}`)
+            return http_post(res.headers.location, data, agent, callback, timeout, verbose)
+        }
+
+        let responseData = '';
+
+        res.on('data', (chunk) => {
+	    if (verbose) {
+                responseData += chunk;
+	    }
+        });
+
+        res.on('end', () => {
+            callback(res, responseData);
+        });
+    });
+
+    req.on('error', (error) => {
+        error_callback(error)
+    });
+    req.on('timeout', () => {
+        req.abort();
+    });
+
+    req.write(data);
+    req.end();
+}
+
 // test http server
 async function http_server(port) {
     const host = "localhost"
@@ -288,11 +329,6 @@ async function mhttp_get(num_threads, count, url, verbose) {
                 if ((++doneCount) == count)
                     resolveDone()
             })
-            /*
-                .on('error', (err) => {
-                throw err
-            })
-            */
         })(i)
     }
 
@@ -304,6 +340,121 @@ async function mhttp_get(num_threads, count, url, verbose) {
         mt = 1
     var pt = executionTime / count
     console.log(`${count} / ${Math.floor(mt)}ms = ${Math.floor(mt / count)}ms per request = ${Math.floor(count * 1000 / mt)} tps, average = ${Math.floor(pt)}ms`)
+}
+
+class Semaphore {
+    constructor(max) {
+        this.max = max;
+        this.counter = 0;
+        this.waiting = [];
+    }
+
+    async acquire() {
+        if (this.counter < this.max) {
+            // console.log(`OOO: good    ${this.counter} / ${this.max}`)
+            this.counter++;
+        } else {
+            // console.log(`XXX: waiting ${this.counter} / ${this.max}`)
+            await new Promise(resolve => this.waiting.push(resolve));
+            this.counter++
+        }
+    }
+
+    release() {
+        // console.log(`___: release ${this.counter} / ${this.max}`)
+        this.counter--;
+        if (this.waiting.length > 0) {
+            const resolve = this.waiting.shift();
+            resolve();
+        }
+    }
+}
+
+// data_gen is a string reprentation of a function that returns a string
+// $ node sqlizer.js mpost 100 10000 http://localhost:58588 "$(<block-number.js)" 2000 0
+/*
+function gen(min, max) {
+  var num = Math.floor(Math.random() * (max - min + 1)) + min;
+  var data = {"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x"+num.toString(16),true],"id":1};
+  return JSON.stringify(data);
+}
+gen(36640000, 36680000);
+*/
+
+async function mhttp_post(num_threads, count, url, data_gen, timeout, verbose) {
+    http.globalAgent.keepAlive = true
+    http.globalAgent.maxSockets = num_threads
+
+    var sem = new Semaphore(num_threads)
+
+    var resolveDone, doneCount = 0, executionTime = 0.0
+    var done = new Promise(resolve => { resolveDone = resolve })
+    var n_success = 0, n_failure = 0, n_error = 0
+    var st = process.hrtime()
+
+    var status = function() {
+        var dt = process.hrtime(st)
+        var mt = dt[0] * 1000 + dt[1] / 1000000
+        if (mt == 0)
+            mt = 1
+        var n = n_success + n_failure + n_error
+        if (n == 0)
+            n = 1
+        var pt = executionTime / n
+        console.log(`${n} / ${Math.floor(mt)}ms = ${Math.floor(mt / count)}ms per request = ${Math.floor(count * 1000 / mt)} tps, average = ${Math.floor(pt)}ms ${n_success}s/${n_failure}f/${n_error}e`)
+    }
+
+    for (var i = 0; i < count; i++) {
+        await (async function(ix) {
+            await sem.acquire()
+            var ist = process.hrtime()
+            var data = eval(data_gen)
+            if (verbose) {
+                console.log(`${ix}: REQ ${data}`)
+            }
+            var req = await http_post(url, http.globalAgent, data,
+                // callback
+                (res, data) => {
+                    var idt = process.hrtime(ist)
+                    var dtms = idt[0] * 1000 + idt[1] / 1000000
+                    executionTime += dtms
+                    if (res.statusCode == 200)
+                        n_success++
+                    else
+                        n_failure++
+                    if (verbose) {
+                        console.log(`${ix}: ${res.statusCode} ${dtms} ${data}`)
+                    } else {
+                        // console.log(`${ix}: ${res.statusCode} ${dtms}`)
+                    }
+                    if ((++doneCount) == count)
+                        resolveDone()
+                    if (doneCount % 1000 == 0)
+                        status()
+                    sem.release()
+                },
+                // error callback
+                (err) => {
+                    var idt = process.hrtime(ist)
+                    var dtms = idt[0] * 1000 + idt[1] / 1000000
+                    executionTime += dtms
+                    n_error++
+                    if (verbose) {
+                        console.log(`${ix}: ${err} ${dtms}`)
+                    }
+                    if ((++doneCount) == count)
+                        resolveDone()
+                    if (doneCount % 1000 == 0)
+                        status()
+                    sem.release()
+                },
+                timeout, verbose)
+        })(i)
+    }
+
+    await done
+
+    status()
 }
 
 var drop_lending_tables_sql = `
@@ -958,9 +1109,10 @@ async function main() {
 	txhist_create <db_name> [<drop>] | txhist_data <db_name> |
 	txhist_data_2 <db_name> <start> <count> <per_block> <num_accts> <dev> |
 	txhist_stress |
-	mquery <num-threads> <count> <query> <verbose> |
 	http-server <port> |
-	mget <num-threads> <count> <url> <verbose>]`)
+	mquery <num-threads> <count> <query> <verbose> |
+	mget <num-threads> <count> <url> <verbose>]
+	mpost <num-threads> <count> <url> <data-gen-code> <timeout-ms> <verbose>]`)
     }
 
     // 0: none, 1: count, 2: details
@@ -1004,7 +1156,18 @@ async function main() {
         }
         var num_threads = parseInt(args[3])
         var count = parseInt(args[4])
-        await mhttp_get(num_threads, count, args[5], verbose(args, 5))
+        await mhttp_get(num_threads, count, args[5], verbose(args, 6))
+        break
+    case "mpost":
+        // node sqlizer.js mpost <num-threads> <count> <url> <data-gen-code> <timeout> <verbose>
+        if (args.length < 6) {
+            usage()
+            return
+        }
+        var num_threads = parseInt(args[3])
+        var count = parseInt(args[4])
+        var timeout = args.length > 7 ? parseInt(args[7]) : nil
+        await mhttp_post(num_threads, count, args[5], args[6], timeout, verbose(args, 8))
         break
     case "lending_create":
         if (args.length < 4) {

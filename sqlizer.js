@@ -401,7 +401,7 @@ async function mhttp_post(num_threads, count, url, data_gen, timeout, verbose) {
         if (n == 0)
             n = 1
         var pt = executionTime / n
-        console.log(`${n} / ${Math.floor(mt)}ms = ${Math.floor(mt / count)}ms per request = ${Math.floor(count * 1000 / mt)} tps, average = ${Math.floor(pt)}ms ${n_success}s/${n_failure}f/${n_error}e`)
+        console.log(`${n} / ${Math.floor(mt)}ms = ${Math.floor(mt / count)}ms per request = ${Math.floor(n * 1000 / mt)} tps, average = ${Math.floor(pt)}ms ${n_success}s/${n_failure}f/${n_error}e`)
     }
 
     for (var i = 0; i < count; i++) {

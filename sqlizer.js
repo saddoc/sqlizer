@@ -228,7 +228,7 @@ async function http_post(url, agent, data, callback, error_callback, timeout, ve
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'Content-Length': data.length
+            'Content-Length': Buffer.byteLength(data, 'utf8')
         },
         timeout: timeout || 5000,
         agent: agent
@@ -429,7 +429,7 @@ async function mhttp_post(num_threads, count, url, data_gen, timeout, verbose) {
                     }
                     if ((++doneCount) == count)
                         resolveDone()
-                    if (doneCount % 1000 == 0)
+                    if (doneCount % 100 == 0)
                         status()
                     sem.release()
                 },
@@ -444,7 +444,7 @@ async function mhttp_post(num_threads, count, url, data_gen, timeout, verbose) {
                     }
                     if ((++doneCount) == count)
                         resolveDone()
-                    if (doneCount % 1000 == 0)
+                    if (doneCount % 100 == 0)
                         status()
                     sem.release()
                 },
